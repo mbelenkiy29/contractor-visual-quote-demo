@@ -8,6 +8,7 @@ import { Link, Route, Switch, Router as WouterRouter, useLocation } from 'wouter
 import { ClerkProvider, SignIn, SignUp, useAuth, useClerk } from '@clerk/react';
 import { publishableKeyFromHost } from '@clerk/react/internal';
 import { shadcn } from '@clerk/themes';
+import { DEMO_CONFIG_KEY, DEMO_SESSION_KEY, mockRedesign, normalizeWebsite, readJson as readStoredJson, writeJson } from '@/lib/demo';
 
 const queryClient = new QueryClient();
 const KITCHEN_IMAGE = '/sample-kitchen.jpg';
@@ -99,12 +100,11 @@ const designSummaries: Record<RoomType, string> = {
 };
 
 function readJson<T>(key: string, fallback: T): T {
-  try {
-    const item = localStorage.getItem(key);
-    return item ? JSON.parse(item) as T : fallback;
-  } catch {
-    return fallback;
-  }
+  return readStoredJson(key, fallback);
+}
+
+function profileFromConfig(config: ContractorConfig): ContractorProfile {
+  return { id: config.id || 'demo', companyName: config.companyName, website: config.website, quoteEmail: config.quoteEmail, accentColor: config.accentColor };
 }
 
 function createSession(config: ContractorConfig): DemoSession {
@@ -126,8 +126,8 @@ function MarketingHeader() {
     </Link>
     <nav className="nav-links" aria-label="Main navigation">
       <Link href="/contractor-setup" data-testid="link-setup">Contractor settings</Link>
-      <Link href="/embed-preview" data-testid="link-embed">Widget embed</Link>
-      <Link href="/requests">Saved requests</Link>
+      <Link href="/demo" data-testid="link-demo">Homeowner demo</Link>
+      <Link href="/inbox" data-testid="link-inbox">Demo inbox</Link>
     </nav>
     <Link href="/contractor-setup" className="button button-primary" data-testid="button-header-start">Start setup <ArrowUpRight size={15} /></Link>
   </header>;
@@ -144,8 +144,8 @@ function Home() {
             <h1 className="display">Turn a room photo into a <em>better brief.</em></h1>
             <p className="hero-lead">Build / quote gives homeowners a useful design direction before they reach your inbox — so your next conversation starts with context, not guesswork.</p>
             <div className="hero-actions">
-              <Link href="/contractor-setup" className="button button-primary" data-testid="button-hero-setup">Configure your intake <ArrowRight size={16} /></Link>
-              <Link href="/requests" className="button button-quiet" data-testid="button-hero-homeowner">Review saved requests</Link>
+              <Link href="/demo" className="button button-primary" data-testid="button-hero-homeowner">Try the homeowner demo <ArrowRight size={16} /></Link>
+              <Link href="/contractor-setup" className="button button-quiet" data-testid="button-hero-setup">Configure your intake</Link>
             </div>
             <div className="hero-note"><ShieldCheck size={15} /> Homeowners can create a real AI design direction and request a conversation.</div>
           </div>
@@ -202,7 +202,7 @@ function apiMessage(data: unknown, fallback: string) {
   return fallback;
 }
 
-function ContractorSettings({ config }: { config: ContractorConfig }) {
+function ContractorSettings({ config, setConfig }: { config: ContractorConfig; setConfig: (value: ContractorConfig) => void }) {
   const [, setLocation] = useLocation();
   const [profile, setProfile] = useState<ContractorProfile | null>(null);
   const [draft, setDraft] = useState<ContractorProfile | null>(null);
@@ -210,16 +210,18 @@ function ContractorSettings({ config }: { config: ContractorConfig }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [saved, setSaved] = useState(false);
+  const [localOnly, setLocalOnly] = useState(false);
   const cameFromLegacyWidget = new URLSearchParams(window.location.search).get('notice') === 'legacy-widget';
   useEffect(() => {
     let cancelled = false;
+    const fallback = profileFromConfig(config);
     fetch('/api/contractor-profile', { credentials: 'include' }).then(async (response) => {
       const data = await response.json();
       if (!response.ok) throw new Error(apiMessage(data, response.status === 401 ? 'Sign in to manage your contractor profile.' : 'Could not load your settings.'));
       if (typeof data.id !== 'string') throw new Error('The contractor profile response is missing its profile ID.');
       return data as ContractorProfile;
-    }).then((data) => { if (!cancelled) { setProfile(data); setDraft(data); } })
-      .catch((cause) => { if (!cancelled) setError(cause instanceof Error ? cause.message : 'Could not load your settings.'); })
+    }).then((data) => { if (!cancelled) { setProfile(data); setDraft(data); setLocalOnly(false); } })
+      .catch(() => { if (!cancelled) { setProfile(fallback); setDraft(fallback); setLocalOnly(true); } })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, []);
@@ -227,22 +229,50 @@ function ContractorSettings({ config }: { config: ContractorConfig }) {
     setSaved(false);
     setDraft((current) => current ? { ...current, [field]: value } : current);
   };
+  const persistLocal = (next: ContractorProfile) => {
+    const stored = { ...config, ...next, logoInitials: initials(next.companyName) };
+    setConfig(stored);
+    writeJson(DEMO_CONFIG_KEY, stored);
+  };
   const save = async (event: FormEvent) => {
     event.preventDefault();
     if (!draft || saving) return;
     setSaving(true); setError(''); setSaved(false);
+    const payload = {
+      companyName: draft.companyName.trim(),
+      website: normalizeWebsite(draft.website),
+      quoteEmail: draft.quoteEmail.trim(),
+      accentColor: draft.accentColor,
+    };
+    if (!payload.companyName || !payload.quoteEmail || !/^#[0-9a-fA-F]{6}$/.test(payload.accentColor)) {
+      setSaving(false);
+      setError('Enter a company name, a quote inbox email, and a six-digit accent color.');
+      return;
+    }
+    if (payload.website && !/^https?:\/\/\S+$/i.test(payload.website)) {
+      setSaving(false);
+      setError('Enter a website like yourcompany.com or https://yourcompany.com.');
+      return;
+    }
+    const nextDraft = { ...draft, ...payload };
     try {
       const response = await fetch('/api/contractor-profile', {
         method: 'PUT', credentials: 'include', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ companyName: draft.companyName, website: draft.website, quoteEmail: draft.quoteEmail, accentColor: draft.accentColor }),
+        body: JSON.stringify(payload),
       });
       if (!response.ok) {
         const data = await response.json().catch(() => null);
         throw new Error(apiMessage(data, 'Could not save your settings. Please check the fields and try again.'));
       }
-      setProfile(draft); setDraft(draft); setSaved(true);
+      setLocalOnly(false);
+      setProfile(nextDraft); setDraft(nextDraft); persistLocal(nextDraft); setSaved(true);
       setLocation('/embed-preview');
-    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not save your settings.'); }
+    } catch (cause) {
+      persistLocal(nextDraft);
+      setProfile(nextDraft); setDraft(nextDraft); setLocalOnly(true); setSaved(true);
+      setError(cause instanceof Error ? `${cause.message} Saved locally so you can still try the demo.` : 'Saved locally so you can still try the demo.');
+      setLocation('/demo');
+    }
     finally { setSaving(false); }
   };
   const activeConfig = profile ? profileConfig(profile) : config;
@@ -255,12 +285,12 @@ function ContractorSettings({ config }: { config: ContractorConfig }) {
         <h2>Company details</h2>
         <div className="field-grid">
           <div className="field"><label htmlFor="company-name">Company name</label><input id="company-name" data-testid="input-company-name" value={draft.companyName} onChange={(event) => update('companyName', event.target.value)} required /></div>
-          <div className="field"><label htmlFor="company-website">Website</label><input id="company-website" data-testid="input-company-website" value={draft.website} onChange={(event) => update('website', event.target.value)} placeholder="yourcompany.com" /></div>
+          <div className="field"><label htmlFor="company-website">Website</label><input id="company-website" data-testid="input-company-website" value={draft.website} onChange={(event) => update('website', event.target.value)} placeholder="yourcompany.com or https://yourcompany.com" /></div>
         </div>
         <div className="field"><label htmlFor="quote-email">Quote inbox</label><input id="quote-email" data-testid="input-quote-email" type="email" value={draft.quoteEmail} onChange={(event) => update('quoteEmail', event.target.value)} required /><span className="field-note">New homeowner requests are sent to this address.</span></div>
         <div className="field"><label htmlFor="accent-color">Accent color</label><div className="color-row"><input id="accent-color" data-testid="input-accent-color" type="color" value={draft.accentColor} onChange={(event) => update('accentColor', event.target.value)} /><span className="mono" style={{ fontSize: 12 }}>{draft.accentColor.toUpperCase()}</span></div><span className="field-note">Used for the primary action in your homeowner widget.</span></div>
         {error && <div className="error-banner" role="alert">{error}</div>}
-        <div className="form-actions"><span className="save-state" aria-live="polite">{saved ? <><Check size={14} /> Saved</> : <><ShieldCheck size={14} /> Server profile</>}</span><button className="button button-primary" data-testid="button-save-config" type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save and continue'} <ArrowRight size={15} /></button></div>
+        <div className="form-actions"><span className="save-state" aria-live="polite">{saved ? <><Check size={14} /> Saved</> : <><ShieldCheck size={14} /> {localOnly ? 'Local demo profile' : 'Server profile'}</>}</span><button className="button button-primary" data-testid="button-save-config" type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save and continue'} <ArrowRight size={15} /></button></div>
       </form>
       <aside className="card preview-card slide-up" aria-label="Appearance preview of the homeowner widget"><div className="preview-top"><div><div className="eyebrow">Live styling</div><h2 style={{ marginTop: 7, marginBottom: 0 }}>Your widget, at a glance</h2></div><Settings2 size={18} className="muted" /></div>
         <div className="mini-widget mini-widget-preview" style={{ '--preview-accent': draft.accentColor } as CSSProperties}>
@@ -281,6 +311,7 @@ function EmbedPreview({ config }: { config: ContractorConfig }) {
   const [profile, setProfile] = useState<ContractorProfile | null>(null);
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
+  const [demoWidget, setDemoWidget] = useState(false);
   useEffect(() => {
     let cancelled = false;
     fetch('/api/contractor-profile', { credentials: 'include' }).then(async (response) => {
@@ -288,11 +319,11 @@ function EmbedPreview({ config }: { config: ContractorConfig }) {
       if (!response.ok) throw new Error(apiMessage(data, 'Could not load the contractor profile.'));
       if (typeof data.id !== 'string') throw new Error('The contractor profile response is missing its profile ID.');
       return data as ContractorProfile;
-    }).then((data) => { if (!cancelled) setProfile(data); })
-      .catch((cause) => { if (!cancelled) setError(cause instanceof Error ? cause.message : 'Could not load the contractor profile.'); });
+    }).then((data) => { if (!cancelled) { setProfile(data); setDemoWidget(false); } })
+      .catch(() => { if (!cancelled) { setProfile(profileFromConfig(config)); setDemoWidget(true); } });
     return () => { cancelled = true; };
-  }, []);
-  const widgetUrl = profile ? `${window.location.origin}${basePath}/widget/${encodeURIComponent(profile.id)}` : '';
+  }, [config]);
+  const widgetUrl = profile ? (demoWidget ? `${window.location.origin}${basePath}/demo` : `${window.location.origin}${basePath}/widget/${encodeURIComponent(profile.id)}`) : '';
   const snippet = widgetUrl ? `<iframe src="${widgetUrl}" title="Request a visual quote" width="100%" height="900" frameborder="0" loading="lazy"></iframe>` : '';
   const copy = async () => {
     if (!snippet) return;
@@ -305,7 +336,7 @@ function EmbedPreview({ config }: { config: ContractorConfig }) {
     {!profile ? <p className="muted">{error ? 'Check sign-in and profile access, then reload.' : 'Loading your widget URL…'}</p> :
     <div className="two-col">
       <section className="card form-card"><div className="eyebrow">Embed snippet</div><h2 style={{ marginTop: 10 }}>Add to {profile.website || 'your website'}.</h2><div className="embed-code"><span className="code-comment">&lt;!-- Build / quote intake --&gt;</span><br />{snippet}</div><div className="copy-row"><span className="copy-confirm" aria-live="polite">{copied ? 'Copied to clipboard' : 'Ready to copy'}</span><button className="button button-quiet" data-testid="button-copy-embed" onClick={() => void copy()}>{copied ? <ClipboardCheck size={15} /> : <Copy size={15} />}{copied ? 'Copied' : 'Copy snippet'}</button></div><p className="field-note" style={{ marginTop: 20 }}>The 900px iframe has its own scroll area. Do not change its source URL; the profile ID associates requests with your account.</p></section>
-      <section className="card preview-card"><div className="preview-top"><div><div className="eyebrow">Public widget address</div><h2 style={{ marginTop: 7, marginBottom: 0 }}>{profile.companyName}</h2></div><span className="pill">Live</span></div><div className="mini-widget"><p style={{ overflowWrap: 'anywhere' }}>{widgetUrl}</p><div className="mock-cta" /></div><div style={{ padding: '0 21px 21px' }}><Link href={`/widget/${encodeURIComponent(profile.id)}`} className="button button-primary" style={{ width: '100%' }} data-testid="button-open-widget">Open homeowner widget <ExternalLink size={15} /></Link></div></section>
+      <section className="card preview-card"><div className="preview-top"><div><div className="eyebrow">{demoWidget ? 'Demo widget address' : 'Public widget address'}</div><h2 style={{ marginTop: 7, marginBottom: 0 }}>{profile.companyName}</h2></div><span className="pill">{demoWidget ? 'Demo' : 'Live'}</span></div><div className="mini-widget"><p style={{ overflowWrap: 'anywhere' }}>{widgetUrl}</p><div className="mock-cta" /></div><div style={{ padding: '0 21px 21px' }}><Link href={demoWidget ? '/demo' : `/widget/${encodeURIComponent(profile.id)}`} className="button button-primary" style={{ width: '100%' }} data-testid="button-open-widget">Open homeowner widget <ExternalLink size={15} /></Link></div></section>
     </div>}
   </main></div>;
 }
@@ -490,9 +521,9 @@ function LegacyWidgetRedirect() {
   return <main className="public-widget-state"><p role="status">This legacy Benchmark link has no tenant ID. Redirecting to contractor settings; generate a current widget URL there.</p></main>;
 }
 
-function WidgetPage({ config, session, setSession }: { config: ContractorConfig; session: DemoSession; setSession: (value: DemoSession) => void }) {
-  const { isLoaded, isSignedIn, userId } = useAuth();
-  const { allowance, loading, refresh } = useAllowance();
+function WidgetPage({ config, session, setSession, demo = false, auth, allowanceState }: { config: ContractorConfig; session: DemoSession; setSession: (value: DemoSession) => void; demo?: boolean; auth?: { isLoaded: boolean; isSignedIn?: boolean; userId?: string | null }; allowanceState?: { allowance: RedesignAllowance | null; loading: boolean; refresh: () => Promise<void> } }) {
+  const { isLoaded, isSignedIn, userId } = auth ?? { isLoaded: true, isSignedIn: demo, userId: demo ? 'demo-homeowner' : undefined };
+  const { allowance, loading, refresh } = allowanceState ?? { allowance: demo ? { remaining: 99, limit: 99, resetsAt: new Date().toISOString(), exhaustedReason: null } : null, loading: false, refresh: async () => undefined };
   const [flow, setFlow] = useState<FlowStatus>('welcome');
   const [room, setRoom] = useState<RoomType>(session.roomType);
   const [uploaded, setUploaded] = useState(false);
@@ -522,11 +553,12 @@ function WidgetPage({ config, session, setSession }: { config: ContractorConfig;
     setSession({ ...session, originalImageUrl: url, originalImageName: file.name, roomType: room });
   };
   const createRedesign = async () => {
-    if (!isLoaded || !isSignedIn || loading || !allowance || allowance.remaining < 1) return;
     if (designBrief.trim().length < 3) {
       setError('Add a short note about what you would like to change.');
       return;
     }
+    const useApi = !demo && isLoaded && isSignedIn && !loading && !!allowance && allowance.remaining > 0;
+    if (!demo && !useApi) return;
     setError('');
     setFlow('processing');
     try {
@@ -536,27 +568,35 @@ function WidgetPage({ config, session, setSession }: { config: ContractorConfig;
         if (!sample.ok) throw new Error('The sample photo could not be loaded.');
         image = new File([await sample.blob()], 'benchmark-kitchen-sample.jpg', { type: 'image/jpeg' });
       }
-      const body = new FormData();
-      body.append('image', image);
-      body.append('roomType', room);
-      body.append('designBrief', designBrief.trim());
-      const response = await fetch('/api/redesigns', { method: 'POST', body });
-      const data = await response.json() as RedesignResponse | ApiErrorResponse;
-      if (!response.ok || !('imageBase64' in data)) {
-        throw new Error('error' in data && data.error ? data.error : 'The redesign could not be created.');
+      let redesignImageUrl = '';
+      if (useApi) {
+        const body = new FormData();
+        body.append('image', image);
+        body.append('roomType', room);
+        body.append('designBrief', designBrief.trim());
+        const response = await fetch('/api/redesigns', { method: 'POST', body });
+        const data = await response.json() as RedesignResponse | ApiErrorResponse;
+        if (!response.ok || !('imageBase64' in data)) {
+          throw new Error('error' in data && data.error ? data.error : 'The redesign could not be created.');
+        }
+        redesignImageUrl = `data:${data.mimeType};base64,${data.imageBase64}`;
+      } else {
+        const sourceUrl = uploaded && session.originalImageUrl ? session.originalImageUrl : KITCHEN_IMAGE;
+        redesignImageUrl = await mockRedesign(sourceUrl, designBrief.trim());
       }
-      const redesignImageUrl = `data:${data.mimeType};base64,${data.imageBase64}`;
       setProgressStep(4);
-      setSession({
+      const nextSession = {
         ...session,
         roomType: room,
         designBrief: designBrief.trim(),
-        flowStatus: 'results',
+        flowStatus: 'results' as const,
         redesignImageUrl,
         designSummary: `A concept direction shaped around your request: ${designBrief.trim()}`,
         checklist: checklistTemplates[room],
         originalImageUrl: uploaded && session.originalImageUrl ? session.originalImageUrl : KITCHEN_IMAGE,
-      });
+      };
+      setSession(nextSession);
+      writeJson(DEMO_SESSION_KEY, nextSession);
       setFlow('results');
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'The redesign could not be created. Please try again.');
@@ -567,7 +607,8 @@ function WidgetPage({ config, session, setSession }: { config: ContractorConfig;
   };
   const submitContact = async (event: FormEvent) => {
     event.preventDefault();
-    if (!contact.name || !contact.email || !isSignedIn || saving) return;
+    if (!contact.name || !contact.email || saving) return;
+    if (!demo && !isSignedIn) return;
     setSaving(true); setError('');
     try {
       let original = selectedFile;
@@ -576,11 +617,26 @@ function WidgetPage({ config, session, setSession }: { config: ContractorConfig;
         if (!sample.ok) throw new Error('The sample photo could not be loaded.');
         original = new File([await sample.blob()], 'sample.jpg', { type: 'image/jpeg' });
       }
-      if (!session.redesignImageUrl.startsWith('data:image/png;base64,')) throw new Error('Create a design direction first.');
+      if (!session.redesignImageUrl.startsWith('data:image/')) throw new Error('Create a design direction first.');
+      const nextSession = {
+        ...session,
+        homeowner: contact,
+        flowStatus: 'submitted' as const,
+        contractorUserId: userId ?? undefined,
+        referenceId: `BQ-${Date.now().toString().slice(-6)}`,
+        roomType: room,
+        designBrief: designBrief.trim(),
+      };
+      if (demo) {
+        writeJson(DEMO_SESSION_KEY, nextSession);
+        setSession(nextSession);
+        setFlow('submitted');
+        return;
+      }
       const concept = await fetch(session.redesignImageUrl);
       const body = new FormData();
       body.append('original', original);
-      body.append('redesign', new File([await concept.blob()], 'concept.png', { type: 'image/png' }));
+      body.append('redesign', new File([await concept.blob()], 'concept.jpg', { type: concept.headers.get('content-type') || 'image/jpeg' }));
       body.append('roomType', room);
       body.append('designBrief', designBrief.trim());
       body.append('homeownerName', contact.name.trim());
@@ -591,7 +647,7 @@ function WidgetPage({ config, session, setSession }: { config: ContractorConfig;
       const data = await response.json() as SaveReceipt & ApiErrorResponse;
       if (!response.ok) throw new Error(data.error || 'The request could not be saved.');
       setReceipt(data);
-      setSession({ ...session, homeowner: contact, flowStatus: 'submitted', contractorUserId: userId ?? undefined, referenceId: data.request.id.slice(0, 8).toUpperCase(), originalImageUrl: data.request.originalImageUrl, redesignImageUrl: data.request.redesignImageUrl });
+      setSession({ ...nextSession, contractorUserId: userId ?? undefined, referenceId: data.request.id.slice(0, 8).toUpperCase(), originalImageUrl: data.request.originalImageUrl, redesignImageUrl: data.request.redesignImageUrl });
       setFlow('submitted');
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'The request could not be saved.');
@@ -604,13 +660,13 @@ function WidgetPage({ config, session, setSession }: { config: ContractorConfig;
     <div className="widget-wrap">
       <div className="widget-top"><Link href="/" data-testid="link-widget-back"><Brand config={config} /></Link><span className="pill"><span style={{ width: 6, height: 6, borderRadius: '50%', background: config.accentColor }} /> {stepLabel}</span></div>
       <div className="widget-card fade-in">
-        {flow === 'welcome' && <><div className="widget-hero"><div><div className="eyebrow">A visual starting point from {config.companyName}</div><h1 className="display">Let’s talk about the room.</h1><p>Share a photo and a little context. We’ll turn it into a rough design direction you can review before requesting a conversation.</p></div></div><div className="widget-body"><div className="stage-actions" style={{ marginTop: 0 }}><span className="muted" style={{ fontSize: 12 }}><ShieldCheck size={14} style={{ verticalAlign: 'middle', marginRight: 5 }} /> Contractor sign-in needed to generate and save · about 2 minutes</span><button className="button button-primary" data-testid="button-start-journey" onClick={() => setFlow('room')}>Start with the room <ArrowRight size={16} /></button></div></div></>}
+        {flow === 'welcome' && <><div className="widget-hero"><div><div className="eyebrow">A visual starting point from {config.companyName}</div><h1 className="display">Let’s talk about the room.</h1><p>Share a photo and a little context. We’ll turn it into a rough design direction you can review before requesting a conversation.</p></div></div><div className="widget-body"><div className="stage-actions" style={{ marginTop: 0 }}><span className="muted" style={{ fontSize: 12 }}><ShieldCheck size={14} style={{ verticalAlign: 'middle', marginRight: 5 }} /> {demo ? 'No account needed · about 2 minutes' : 'Contractor sign-in needed to generate and save · about 2 minutes'}</span><button className="button button-primary" data-testid="button-start-journey" onClick={() => setFlow('room')}>Start with the room <ArrowRight size={16} /></button></div></div></>}
         {flow === 'room' && <div className="widget-body slide-up"><div className="eyebrow">Step 1 / 3</div><h2>What are we looking at?</h2><p>Choose the closest fit. It helps us keep the visual direction and planning notes relevant.</p><div className="room-grid">{(Object.keys(roomLabels) as RoomType[]).map((item) => <button type="button" className={`room-option ${room === item ? 'selected' : ''}`} key={item} data-testid={`button-room-${item}`} onClick={() => setRoom(item)}><div className="room-icon"><RoomIcon room={item} /></div><strong>{roomLabels[item]}</strong><span>{item === 'other' ? 'Tell us more later' : 'A focused starting point'}</span></button>)}</div><div className="stage-actions"><button className="button button-ghost" data-testid="button-back-welcome" onClick={() => setFlow('welcome')}><ArrowLeft size={15} /> Back</button><button className="button button-primary" data-testid="button-continue-room" onClick={() => { setSession({ ...session, roomType: room }); setFlow('upload'); }}>Continue <ArrowRight size={15} /></button></div></div>}
-        {flow === 'upload' && <div className="widget-body slide-up"><div className="eyebrow">Step 2 / 3</div><h2>Bring a little context.</h2><p>Use the sample or add your own room photo. The photo is processed for an AI redesign. If you submit a request, the contractor keeps both images and your contact details privately for up to 90 days. You can delete sooner with the link shown after submitting.</p><div className="upload-stage"><label className="upload-box file-button"><CloudUpload size={28} /><strong>{uploaded ? 'Photo added' : 'Add your room photo'}</strong><p>{uploaded ? session.originalImageName : 'JPG, PNG, or WebP · up to 10 MB.'}</p><span className="button button-quiet">{uploaded ? 'Choose another' : 'Choose image'}<input type="file" accept="image/jpeg,image/png,image/webp" onChange={onUpload} /></span></label><button type="button" className="sample-box" data-testid="button-use-sample" onClick={() => { setUploaded(false); setSelectedFile(null); setSession({ ...session, originalImageUrl: KITCHEN_IMAGE, originalImageName: 'benchmark-kitchen-sample.jpg', roomType: room }); }}><div className="sample-box-content"><strong>Use the sample project</strong><p>Warm kitchen / natural materials</p></div></button></div><div className="field design-brief"><label htmlFor="design-brief">What would you like to change?</label><textarea id="design-brief" data-testid="input-design-brief" maxLength={500} value={designBrief} onChange={(event) => setDesignBrief(event.target.value)} placeholder="For example: lighter oak cabinets, warm stone surfaces, and softer lighting. Keep the existing layout." /><span className="field-note">The AI will preserve the room’s perspective and major structure while applying this direction.</span></div><AccessPanel allowance={allowance} loading={loading} />{error && <div className="error-banner" role="alert">{error}</div>}<div className="stage-actions"><button className="button button-ghost" data-testid="button-back-room" onClick={() => setFlow('room')}><ArrowLeft size={15} /> Back</button><div className="right-actions"><button disabled={!isSignedIn || loading || !allowance?.remaining} className="button button-primary" data-testid="button-review-photo" onClick={createRedesign}>Create my direction <Sparkles size={15} /></button></div></div></div>}
+        {flow === 'upload' && <div className="widget-body slide-up"><div className="eyebrow">Step 2 / 3</div><h2>Bring a little context.</h2><p>{demo ? 'Use the sample or add your own room photo. This demo creates a visual direction and rough checklist, then shows the contractor inbox preview.' : 'Use the sample or add your own room photo. The photo is processed for an AI redesign. If you submit a request, the contractor keeps both images and your contact details privately for up to 90 days. You can delete sooner with the link shown after submitting.'}</p><div className="upload-stage"><label className="upload-box file-button"><CloudUpload size={28} /><strong>{uploaded ? 'Photo added' : 'Add your room photo'}</strong><p>{uploaded ? session.originalImageName : 'JPG, PNG, or WebP · up to 10 MB.'}</p><span className="button button-quiet">{uploaded ? 'Choose another' : 'Choose image'}<input type="file" accept="image/jpeg,image/png,image/webp" onChange={onUpload} /></span></label><button type="button" className="sample-box" data-testid="button-use-sample" onClick={() => { setUploaded(false); setSelectedFile(null); setSession({ ...session, originalImageUrl: KITCHEN_IMAGE, originalImageName: 'benchmark-kitchen-sample.jpg', roomType: room }); }}><div className="sample-box-content"><strong>Use the sample project</strong><p>Warm kitchen / natural materials</p></div></button></div><div className="field design-brief"><label htmlFor="design-brief">What would you like to change?</label><textarea id="design-brief" data-testid="input-design-brief" maxLength={500} value={designBrief} onChange={(event) => setDesignBrief(event.target.value)} placeholder="For example: lighter oak cabinets, warm stone surfaces, and softer lighting. Keep the existing layout." /><span className="field-note">{demo ? 'The preview keeps the room’s viewpoint and applies a visual grade from your brief.' : 'The AI will preserve the room’s perspective and major structure while applying this direction.'}</span></div>{!demo && clerkPubKey && <AccessPanel allowance={allowance} loading={loading} />}{error && <div className="error-banner" role="alert">{error}</div>}<div className="stage-actions"><button className="button button-ghost" data-testid="button-back-room" onClick={() => setFlow('room')}><ArrowLeft size={15} /> Back</button><div className="right-actions"><button disabled={demo ? false : (!isSignedIn || loading || !allowance?.remaining)} className="button button-primary" data-testid="button-review-photo" onClick={() => void createRedesign()}>Create my direction <Sparkles size={15} /></button></div></div></div>}
         {flow === 'processing' && <div className="widget-body progress-stage slide-up"><div className="pill" style={{ marginBottom: 19 }}><LoaderCircle className="spin" size={13} /> Secure AI image edit</div><h2>Making the first pass.</h2><p>OpenAI is editing the source photo while keeping the room’s viewpoint and major architecture in place. This can take up to two minutes.</p><div className="progress-bar"><div className="progress-fill progress-fill-live" style={{ width: `${Math.max(12, Math.min(progressStep, 3) * 28)}%` }} /></div><div className="progress-list">{processingLabels.map((label, index) => <div className={`progress-item ${progressStep > index ? 'done' : ''} ${progressStep === index ? 'active' : ''}`} key={label}>{progressStep > index ? <Check size={15} /> : progressStep === index ? <LoaderCircle className="spin" size={15} /> : <span style={{ width: 15, height: 15, border: '1px solid hsl(var(--border))', borderRadius: '50%' }} />}{label}</div>)}</div></div>}
         {flow === 'results' && <div className="widget-body slide-up"><div className="eyebrow">Step 3 / 3 · AI concept</div><h2>A direction to react to.</h2><p>Here’s an AI-edited conversation starter for your {roomLabels[room].toLowerCase()}. Your contractor still verifies scope, measurements, and feasibility.</p><div className="result-grid"><div className="visual-compare"><div className="visual-pane original" style={{ backgroundImage: `url(${currentOriginal})` }} /><div className="visual-pane redesign" style={{ backgroundImage: `url(${session.redesignImageUrl})` }} /></div><div className="result-copy"><div className="pill" style={{ marginBottom: 13 }}>Your requested direction</div><h3>{roomLabels[room]} / AI concept</h3><p>{session.designSummary || designSummaries[room]}</p></div></div><div className="result-sections"><div className="card checklist"><h3>Rough project checklist <span className="pill">4 notes</span></h3><ul>{(session.checklist.length ? session.checklist : checklistTemplates[room]).map((item) => <li key={item}><SquareCheck size={14} />{item}</li>)}</ul></div><div className="card checklist"><h3>Before we talk scope</h3><div className="disclaimer">This AI image is an early visual concept, not a measured plan, quote, feasibility review, or promise of outcome. The contractor will verify all conditions and pricing.</div><p className="muted" style={{ fontSize: 12, lineHeight: 1.6, marginBottom: 0 }}>Like the direction? Send your details and {config.companyName} can pick up the thread.</p></div></div><div className="stage-actions"><button className="button button-ghost" data-testid="button-start-over" onClick={resetFlow}><RefreshCcw size={15} /> Start over</button><button className="button button-primary" data-testid="button-request-conversation" onClick={() => setFlow('contact')}>Request a conversation <ArrowRight size={15} /></button></div></div>}
         {flow === 'contact' && <form className="widget-body slide-up" onSubmit={submitContact}><div className="eyebrow">Almost there</div><h2>Where should they pick this up?</h2><p>Share the details you’re comfortable with. This demo will show you exactly what the contractor would receive.</p><div className="contact-layout"><div><div className="field"><label htmlFor="homeowner-name">Your name</label><input id="homeowner-name" data-testid="input-homeowner-name" value={contact.name} onChange={(event) => updateContact('name', event.target.value)} placeholder="e.g. Mia Chen" required /></div><div className="field-grid"><div className="field"><label htmlFor="homeowner-email">Email</label><input id="homeowner-email" data-testid="input-homeowner-email" type="email" value={contact.email} onChange={(event) => updateContact('email', event.target.value)} placeholder="mia@example.com" required /></div><div className="field"><label htmlFor="homeowner-phone">Phone <span className="muted">(optional)</span></label><input id="homeowner-phone" data-testid="input-homeowner-phone" value={contact.phone} onChange={(event) => updateContact('phone', event.target.value)} placeholder="04xx xxx xxx" /></div></div><div className="field"><label htmlFor="homeowner-notes">What should they know?</label><textarea id="homeowner-notes" data-testid="input-homeowner-notes" value={contact.notes} onChange={(event) => updateContact('notes', event.target.value)} placeholder="Timing, what isn’t working, or what you want to keep..." /></div></div><aside className="contact-note"><strong>Your request, in plain English.</strong><p>{roomLabels[room]} direction, rough checklist, your original image, and the details you add here.</p><div className="disclaimer">No email is sent in this prototype. We’ll show the contractor preview next.</div></aside></div><div className="stage-actions"><button type="button" className="button button-ghost" data-testid="button-back-results" onClick={() => setFlow('results')}><ArrowLeft size={15} /> Back</button><button type="submit" className="button button-primary" data-testid="button-submit-request">Show contractor preview <Send size={15} /></button></div></form>}
-        {flow === 'submitted' && <div className="confirm slide-up"><div className="confirm-mark"><Check size={30} /></div><div className="eyebrow">Request saved privately</div><h2 className="display">That’s a clearer brief.</h2><p>{config.companyName} can revisit this request in their signed-in workspace. No email has been sent. Save the deletion link below if you want to remove your details and photos sooner.</p><div className="reference"><FileImage size={14} /> Reference {session.referenceId}</div><div className="stage-actions" style={{ justifyContent: 'center', marginTop: 29 }}><Link href="/contractor-email" className="button button-primary" data-testid="button-view-email">View contractor preview <Mail size={15} /></Link><button className="button button-quiet" data-testid="button-reset-widget" onClick={resetFlow}>Start another request</button></div></div>}
+        {flow === 'submitted' && <div className="confirm slide-up"><div className="confirm-mark"><Check size={30} /></div><div className="eyebrow">{demo ? 'Demo request ready' : 'Request saved privately'}</div><h2 className="display">That’s a clearer brief.</h2><p>{demo ? `${config.companyName} can review this lead in the demo inbox. Nothing has been emailed.` : `${config.companyName} can revisit this request in their signed-in workspace. No email has been sent. Save the deletion link below if you want to remove your details and photos sooner.`}</p><div className="reference"><FileImage size={14} /> Reference {session.referenceId}</div><div className="stage-actions" style={{ justifyContent: 'center', marginTop: 29 }}><Link href="/inbox" className="button button-primary" data-testid="button-view-email">View contractor preview <Mail size={15} /></Link><button className="button button-quiet" data-testid="button-reset-widget" onClick={resetFlow}>Start another request</button></div></div>}
       </div>
       {error && flow === 'contact' && <div className="error-banner" role="alert">{error}</div>}
       {receipt && flow === 'submitted' && <div className="card" style={{ padding: 20, marginTop: 20 }}>
@@ -713,37 +769,61 @@ function RoutedErrorBoundary({ children }: { children: ReactNode }) {
   return <ErrorBoundary resetKey={location}>{children}</ErrorBoundary>;
 }
 
-function Router({ config }: { config: ContractorConfig }) {
+function ClerkWidgetPage({ config, session, setSession }: { config: ContractorConfig; session: DemoSession; setSession: (value: DemoSession) => void }) {
+  const auth = useAuth();
+  const allowanceState = useAllowance();
+  return <WidgetPage config={config} session={session} setSession={setSession} auth={auth} allowanceState={allowanceState} />;
+}
+
+function DemoWidgetPage({ config, session, setSession }: { config: ContractorConfig; session: DemoSession; setSession: (value: DemoSession) => void }) {
+  return <WidgetPage config={config} session={session} setSession={setSession} demo />;
+}
+
+function BenchmarkWidget({ config, session, setSession }: { config: ContractorConfig; session: DemoSession; setSession: (value: DemoSession) => void }) {
+  if (!clerkPubKey) return <DemoWidgetPage config={config} session={session} setSession={setSession} />;
+  return <ClerkWidgetPage config={config} session={session} setSession={setSession} />;
+}
+
+function Router({ config, setConfig, session, setSession }: { config: ContractorConfig; setConfig: (value: ContractorConfig) => void; session: DemoSession; setSession: (value: DemoSession) => void }) {
   return <RoutedErrorBoundary><Switch>
     <Route path="/" component={Home} />
-    <Route path="/sign-in/*?"><div className="auth-page"><SignIn routing="path" path={`${basePath}/sign-in`} signUpUrl={`${basePath}/sign-up`} forceRedirectUrl={`${basePath}/contractor-setup`} /></div></Route>
-    <Route path="/sign-up/*?"><div className="auth-page"><SignUp routing="path" path={`${basePath}/sign-up`} signInUrl={`${basePath}/sign-in`} forceRedirectUrl={`${basePath}/contractor-setup`} /></div></Route>
-    <Route path="/contractor-setup"><ContractorSettings config={config} /></Route>
+    {clerkPubKey && <Route path="/sign-in/*?"><div className="auth-page"><SignIn routing="path" path={`${basePath}/sign-in`} signUpUrl={`${basePath}/sign-up`} forceRedirectUrl={`${basePath}/contractor-setup`} /></div></Route>}
+    {clerkPubKey && <Route path="/sign-up/*?"><div className="auth-page"><SignUp routing="path" path={`${basePath}/sign-up`} signInUrl={`${basePath}/sign-in`} forceRedirectUrl={`${basePath}/contractor-setup`} /></div></Route>}
+    <Route path="/contractor-setup"><ContractorSettings config={config} setConfig={setConfig} /></Route>
     <Route path="/embed-preview"><EmbedPreview config={config} /></Route>
-    <Route path="/requests"><RequestHistory config={config} /></Route>
+    <Route path="/demo"><DemoWidgetPage config={config} session={session} setSession={setSession} /></Route>
+    <Route path="/widget/benchmark"><BenchmarkWidget config={config} session={session} setSession={setSession} /></Route>
+    <Route path="/inbox"><ContractorEmail config={config} session={session} /></Route>
+    <Route path="/contractor-email"><ContractorEmail config={config} session={session} /></Route>
+    <Route path="/requests">{clerkPubKey ? <RequestHistory config={config} /> : <ContractorEmail config={config} session={session} />}</Route>
     <Route component={NotFoundPage} />
   </Switch></RoutedErrorBoundary>;
 }
 
 function App() {
-  return <WouterRouter base={basePath}><ClerkRoutes config={defaults} /></WouterRouter>;
+  const [config, setConfig] = useState<ContractorConfig>(() => readJson(DEMO_CONFIG_KEY, defaults));
+  const [session, setSession] = useState<DemoSession>(() => readJson(DEMO_SESSION_KEY, createSession(readJson(DEMO_CONFIG_KEY, defaults))));
+  useEffect(() => { writeJson(DEMO_CONFIG_KEY, config); }, [config]);
+  useEffect(() => { writeJson(DEMO_SESSION_KEY, session); }, [session]);
+  return <WouterRouter base={basePath}><ClerkRoutes config={config} setConfig={setConfig} session={session} setSession={setSession} /></WouterRouter>;
 }
 
 function PublicWidgetRoutes() {
   return <RoutedErrorBoundary><Switch>
-    <Route path="/widget/benchmark" component={LegacyWidgetRedirect} />
-    <Route path="/widget/:id">{(params) => <PublicWidget key={params.id} id={params.id} />}</Route>
+    <Route path="/widget/:id">{(params) => params.id === 'benchmark' ? <LegacyWidgetRedirect /> : <PublicWidget key={params.id} id={params.id} />}</Route>
     <Route path="/delete-request/:id">{(params) => <HomeownerDelete id={params.id} />}</Route>
     <Route component={NotFoundPage} />
   </Switch></RoutedErrorBoundary>;
 }
 
-function ClerkRoutes({ config }: { config: ContractorConfig }) {
+function ClerkRoutes({ config, setConfig, session, setSession }: { config: ContractorConfig; setConfig: (value: ContractorConfig) => void; session: DemoSession; setSession: (value: DemoSession) => void }) {
   const [, setLocation] = useLocation();
   const [location] = useLocation();
   const stripBase = (path: string) => basePath && path.startsWith(basePath) ? path.slice(basePath.length) || '/' : path;
-  if (location.startsWith('/widget/') || location.startsWith('/delete-request/')) return <PublicWidgetRoutes />;
-  if (!clerkPubKey) return <main className="public-widget-state"><div className="error-banner" role="alert">Contractor sign-in is not configured on this site. Public homeowner widgets remain available.</div><Link className="button button-primary" href="/">Back to home</Link></main>;
+  const isLegacyBenchmark = location === '/widget/benchmark' || location.startsWith('/widget/benchmark/');
+  if ((location.startsWith('/widget/') && !isLegacyBenchmark) || location.startsWith('/delete-request/')) return <PublicWidgetRoutes />;
+  const app = <QueryClientProvider client={queryClient}><TooltipProvider><Router config={config} setConfig={setConfig} session={session} setSession={setSession} /><Toaster /></TooltipProvider></QueryClientProvider>;
+  if (!clerkPubKey) return app;
   return <ClerkProvider
     publishableKey={clerkPubKey}
     proxyUrl={clerkProxyUrl}
@@ -753,7 +833,7 @@ function ClerkRoutes({ config }: { config: ContractorConfig }) {
     localization={{ signIn: { start: { title: 'Welcome back', subtitle: 'Sign in for contractor redesign access' } }, signUp: { start: { title: 'Create contractor access', subtitle: 'Protect and track your redesign allowance' } } }}
     routerPush={(to) => setLocation(stripBase(to))}
     routerReplace={(to) => setLocation(stripBase(to), { replace: true })}
-  ><QueryClientProvider client={queryClient}><TooltipProvider><Router config={config} /><Toaster /></TooltipProvider></QueryClientProvider></ClerkProvider>;
+  >{app}</ClerkProvider>;
 }
 
 export default App;

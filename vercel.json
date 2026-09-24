@@ -1,0 +1,9 @@
+{
+  "buildCommand": "pnpm --filter @workspace/contractor-visual-quote-demo run build",
+  "outputDirectory": "artifacts/contractor-visual-quote-demo/dist/public",
+  "installCommand": "pnpm install --frozen-lockfile",
+  "framework": null,
+  "rewrites": [
+    { "source": "/((?!assets/).*)", "destination": "/index.html" }
+  ]
+}

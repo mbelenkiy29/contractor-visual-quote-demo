@@ -29,6 +29,23 @@ import { sendUseSendEmail } from "../lib/usesend-email";
 const router: IRouter = Router();
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 const rooms = ["kitchen", "bathroom", "living-room", "bedroom", "other"] as const;
+function normalizeWebsite(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  if (/^https?:\/\/\S+$/i.test(trimmed)) return trimmed;
+  if (/^[\w][\w.-]*\.[A-Za-z]{2,}([/:?#]\S*)?$/i.test(trimmed)) return `https://${trimmed}`;
+  return trimmed;
+}
+
+function normalizeProfileBody(body: unknown) {
+  if (!body || typeof body !== "object") return body;
+  const record = { ...(body as Record<string, unknown>) };
+  if (typeof record.website === "string") record.website = normalizeWebsite(record.website);
+  if (typeof record.companyName === "string") record.companyName = record.companyName.trim();
+  if (typeof record.quoteEmail === "string") record.quoteEmail = record.quoteEmail.trim();
+  return record;
+}
+
 const profileInput = z.object({
   companyName: z.string().trim().min(1).max(150),
   website: z.string().trim().max(500).refine((value) => value === "" || /^https?:\/\/\S+$/i.test(value), "Enter a valid http(s) website URL."),
@@ -345,8 +362,9 @@ router.get("/contractor-profile", async (req, res): Promise<void> => {
 router.put("/contractor-profile", async (req, res): Promise<void> => {
   const ownerId = currentUser(req, res);
   if (!ownerId) return;
-  const parsed = UpdateContractorProfileBody.safeParse(req.body);
-  const validInput = profileInput.safeParse(req.body);
+  const body = normalizeProfileBody(req.body);
+  const parsed = UpdateContractorProfileBody.safeParse(body);
+  const validInput = profileInput.safeParse(body);
   if (!parsed.success || !validInput.success) {
     res.status(400).json({ error: "Enter a company name, valid quote email and website URL, and a six-digit accent color." });
     return;
