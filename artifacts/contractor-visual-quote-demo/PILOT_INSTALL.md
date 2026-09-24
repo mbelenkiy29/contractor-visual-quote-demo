@@ -4,7 +4,7 @@
 
 1. Confirm the API and web workflows are running.
 2. This pilot uses useSend Cloud's API. In Replit Secrets, set `USESEND_API_KEY` to the useSend Cloud API key and `USESEND_FROM_EMAIL` to a sender address verified with useSend. Never put the API key in source control or logs. Do not use a homeowner's address as the sender; it is used only for reply-to. A self-hosted useSend instance would require configuring its own API base URL before testing.
-3. Sign in as the Benchmark contractor. Open **Contractor setup**, enter the company name, full website URL (including `https://`), and the quote inbox. Save.
+3. Sign in as the Benchmark contractor. Open **Contractor setup**, enter the company name, website (`yourcompany.com` or a full `https://` URL), and the quote inbox. Save. A no-auth click-through is also available at `/demo`, with the contractor preview at `/inbox`.
 4. Open **Widget embed**. Copy the iframe snippet. Its tenant-specific URL is stable; do not replace the ID with `benchmark`. Changing the quote inbox later does not require reinstalling the snippet.
 
 ## Install and test
