@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Contractor Visual Quote Demo"
+description = "A frontend-only interactive demo for contractors and homeowners: configure an embeddable renovation visualizer, upload a room photo, review a simulated redesign and rough scope checklist, then preview the lead email a contractor would receive."
+version = "1.0.0"
+id = "artifacts/contractor-visual-quote-demo"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 21640
+
+[services.development]
+run = "pnpm --filter @workspace/contractor-visual-quote-demo run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/contractor-visual-quote-demo", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/contractor-visual-quote-demo/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "21640"
+BASE_PATH = "/"

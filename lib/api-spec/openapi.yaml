@@ -1,0 +1,445 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: API specification
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: redesigns
+    description: AI room redesign and private quote request operations
+  - name: benchmark-widget
+    description: Public Benchmark contractor profiles, redesigns, and quote referrals
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+  /redesigns:
+    post:
+      operationId: createRoomRedesign
+      tags: [redesigns]
+      summary: Create a room redesign from an uploaded photo
+      description: Requires a contractor session. Reserves a monthly allowance before processing the photo ephemerally.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/RoomRedesignInput"
+      responses:
+        "200":
+          description: Redesign created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoomRedesignResult"
+        "400":
+          description: Invalid image or request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Contractor sign-in required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: Redesign rate or concurrency limit reached
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: Redesign service is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "502":
+          description: OpenAI could not create the redesign
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "504":
+          description: Redesign request timed out
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /contractor-profile:
+    get:
+      operationId: getContractorProfile
+      tags: [benchmark-widget]
+      summary: Get the signed-in contractor's public widget profile
+      security: [{ clerkSession: [] }]
+      responses:
+        "200":
+          description: Contractor profile
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ContractorProfile" }
+        "401": { description: Contractor sign-in required }
+    put:
+      operationId: updateContractorProfile
+      tags: [benchmark-widget]
+      summary: Update the signed-in contractor's public widget profile
+      security: [{ clerkSession: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ContractorProfileUpdate" }
+      responses:
+        "200":
+          description: Updated profile
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ContractorProfile" }
+        "400": { description: Invalid profile fields }
+        "401": { description: Contractor sign-in required }
+  /widget/{id}:
+    get:
+      operationId: getPublicWidgetProfile
+      tags: [benchmark-widget]
+      summary: Get public widget branding
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Public contractor branding
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PublicWidgetProfile" }
+        "404": { description: Widget not found }
+  /widget/{id}/redesign:
+    post:
+      operationId: createPublicWidgetRedesign
+      tags: [benchmark-widget]
+      summary: Create a public widget room concept
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema: { $ref: "#/components/schemas/WidgetRedesignInput" }
+      responses:
+        "200":
+          description: Generated concept and signed, input-bound submission token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WidgetRedesignResult" }
+        "400": { description: Invalid upload or a photo that is not a room image }
+        "404": { description: Widget not found }
+        "429": { description: Per-IP or contractor allowance limit reached }
+        "502": { description: Redesign provider failed }
+        "503": { description: Required service configuration is unavailable }
+  /widget/{id}/requests:
+    post:
+      operationId: submitPublicWidgetRequest
+      tags: [benchmark-widget]
+      summary: Email a homeowner quote request to the profile's configured recipient
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema: { $ref: "#/components/schemas/WidgetRequestInput" }
+      responses:
+        "200":
+          description: Request accepted by the email provider; returns its request ID and one-time homeowner deletion token. Identical idempotent retries return the same values.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WidgetRequestResult" }
+        "400": { description: "Invalid form, images, or redesign token" }
+        "404": { description: Widget not found }
+        "409": { description: "Submission is already being processed or key reused with different data" }
+        "429": { description: Per-IP request limit reached }
+        "502": { description: Email provider rejected or did not accept this message }
+        "503": { description: Sender or email integration is not configured }
+  /redesigns/allowance:
+    get:
+      operationId: getRedesignAllowance
+      tags: [redesigns]
+      summary: Get signed-in contractor's remaining monthly redesign allowance
+      responses:
+        "200":
+          description: Remaining quota and estimated spend allowance
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RedesignAllowance"
+        "401":
+          description: Contractor sign-in required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /visual-requests:
+    get:
+      operationId: listVisualRequests
+      tags: [redesigns]
+      summary: List the signed-in contractor's unexpired requests
+      responses:
+        "200":
+          description: Requests
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/VisualRequest"
+        "401":
+          description: Contractor sign-in required
+    post:
+      operationId: saveVisualRequest
+      tags: [redesigns]
+      summary: Save a quote request and its two private images
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/VisualRequestInput"
+      responses:
+        "201":
+          description: Saved request and homeowner deletion token (returned only once)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  request: { $ref: "#/components/schemas/VisualRequest" }
+                  deletionToken: { type: string }
+                required: [request, deletionToken]
+        "400":
+          description: Invalid request
+        "401":
+          description: Contractor sign-in required
+        "503":
+          description: Private storage is unavailable; nothing was saved
+  /visual-requests/{id}:
+    get:
+      operationId: getVisualRequest
+      tags: [redesigns]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Contractor-owned request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VisualRequest" }
+        "401": { description: Contractor sign-in required }
+        "404": { description: Not found }
+    delete:
+      operationId: deleteVisualRequest
+      tags: [redesigns]
+      summary: Delete a contractor-owned request and both images
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "204": { description: Deleted }
+        "401": { description: Contractor sign-in required }
+        "404": { description: Not found }
+  /visual-requests/{id}/images/{kind}:
+    get:
+      operationId: getVisualRequestImage
+      tags: [redesigns]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: kind, in: path, required: true, schema: { type: string, enum: [original, redesign] } }
+      responses:
+        "200":
+          description: Private image bytes
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+        "401": { description: Contractor sign-in required }
+        "404": { description: Not found }
+  /visual-requests/{id}/homeowner-delete:
+    post:
+      operationId: homeownerDeleteVisualRequest
+      tags: [redesigns]
+      summary: Delete a request using the one-time homeowner deletion code
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HomeownerDeleteInput"
+      responses:
+        "204": { description: Deleted }
+        "404": { description: Not found or invalid deletion code }
+components:
+  securitySchemes:
+    clerkSession:
+      type: http
+      scheme: bearer
+      description: Clerk authenticated session
+  schemas:
+    ContractorProfile:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        companyName: { type: string }
+        website: { type: string }
+        quoteEmail: { type: string }
+        accentColor: { type: string }
+      required: [id, companyName, website, quoteEmail, accentColor]
+    ContractorProfileUpdate:
+      type: object
+      properties:
+        companyName: { type: string, minLength: 1, maxLength: 150 }
+        website: { type: string, maxLength: 500 }
+        quoteEmail: { type: string, format: email, maxLength: 320 }
+        accentColor: { type: string, pattern: "^#[0-9a-fA-F]{6}$" }
+      required: [companyName, website, quoteEmail, accentColor]
+    PublicWidgetProfile:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        companyName: { type: string }
+        accentColor: { type: string }
+      required: [id, companyName, accentColor]
+    WidgetRedesignInput:
+      type: object
+      properties:
+        image: { type: string, format: binary }
+        roomType: { type: string, enum: [kitchen, bathroom, living-room, bedroom, other] }
+        designBrief: { type: string, minLength: 3, maxLength: 500 }
+      required: [image, roomType, designBrief]
+    WidgetRedesignResult:
+      type: object
+      properties:
+        imageBase64: { type: string }
+        mimeType: { type: string, enum: [image/png] }
+        checklist:
+          type: array
+          items: { type: string }
+        designSummary: { type: string }
+        redesignToken: { type: string }
+      required: [imageBase64, mimeType, checklist, designSummary, redesignToken]
+    WidgetRequestInput:
+      type: object
+      properties:
+        original: { type: string, format: binary }
+        redesign: { type: string, format: binary }
+        roomType: { type: string, enum: [kitchen, bathroom, living-room, bedroom, other] }
+        designBrief: { type: string, minLength: 3, maxLength: 500 }
+        homeownerName: { type: string, minLength: 1, maxLength: 150 }
+        homeownerEmail: { type: string, format: email, maxLength: 320 }
+        homeownerPhone: { type: string, maxLength: 100 }
+        homeownerNotes: { type: string, maxLength: 2000 }
+        redesignToken: { type: string }
+        requestKey: { type: string, minLength: 8, maxLength: 128 }
+      required: [original, redesign, roomType, designBrief, homeownerName, homeownerEmail, redesignToken, requestKey]
+    WidgetRequestResult:
+      type: object
+      properties:
+        referenceId: { type: string, format: uuid }
+        requestId: { type: string, format: uuid }
+        deletionToken: { type: string, minLength: 64, maxLength: 64 }
+      required: [referenceId, requestId, deletionToken]
+    HomeownerDeleteInput:
+      type: object
+      properties:
+        deletionToken: { type: string }
+      required: [deletionToken]
+    VisualRequestInput:
+      type: object
+      properties:
+        original: { type: string, format: binary }
+        redesign: { type: string, format: binary }
+        roomType: { type: string, enum: [kitchen, bathroom, living-room, bedroom, other] }
+        designBrief: { type: string, minLength: 3, maxLength: 500 }
+        homeownerName: { type: string, minLength: 1, maxLength: 150 }
+        homeownerEmail: { type: string, format: email, maxLength: 320 }
+        homeownerPhone: { type: string, maxLength: 100 }
+        homeownerNotes: { type: string, maxLength: 2000 }
+      required: [original, redesign, roomType, designBrief, homeownerName, homeownerEmail]
+    VisualRequest:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        roomType: { type: string }
+        designBrief: { type: string }
+        homeownerName: { type: string }
+        homeownerEmail: { type: string }
+        homeownerPhone: { type: string }
+        homeownerNotes: { type: string }
+        originalImageUrl: { type: string }
+        redesignImageUrl: { type: string }
+        createdAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+      required: [id, roomType, designBrief, homeownerName, homeownerEmail, homeownerPhone, homeownerNotes, originalImageUrl, redesignImageUrl, createdAt, expiresAt]
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+    RoomRedesignInput:
+      type: object
+      properties:
+        image:
+          type: string
+          description: Room photo file sent in the multipart image field.
+        roomType:
+          type: string
+          enum: [kitchen, bathroom, living-room, bedroom, other]
+        designBrief:
+          type: string
+          minLength: 3
+          maxLength: 500
+      required: [image, roomType, designBrief]
+    RoomRedesignResult:
+      type: object
+      properties:
+        imageBase64:
+          type: string
+        mimeType:
+          type: string
+          enum: [image/png]
+      required: [imageBase64, mimeType]
+    RedesignAllowance:
+      type: object
+      properties:
+        remaining:
+          type: integer
+        limit:
+          type: integer
+        resetsAt:
+          type: string
+          format: date-time
+        exhaustedReason:
+          type: ["string", "null"]
+      required: [remaining, limit, resetsAt, exhaustedReason]
+    ApiError:
+      type: object
+      properties:
+        error:
+          type: string
+      required: [error]
+
